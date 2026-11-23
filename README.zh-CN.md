@@ -73,6 +73,7 @@
 支持 **Windows x64**。[下载最新版本](https://github.com/the-Macro-Man/ClickSyncMouseTester/releases/latest/download/clicksync-app.exe)后双击运行；其他发布包见此分支的 [Releases](https://github.com/the-Macro-Man/ClickSyncMouseTester/releases)，也可从源码启动。
 该可执行文件未签名，Windows SmartScreen 可能显示警告。
 进入功能页后，可通过左上角菜单切换功能，右上角切换语言与主题。
+菜单会为识别为 RP2040 或 Raspberry Pi 的设备显示 Raspberry Pi 标志；其他设备保留原有品牌图案。
 
 <details>
 <summary>从源码运行</summary>

@@ -17,6 +17,10 @@ pub(super) const SVG_ASSETS: &[(&str, &[u8])] = &[
         include_bytes!("../../../../assets/brand/razer-1.svg"),
     ),
     (
+        "brand/Raspberry_Pi.svg",
+        include_bytes!("../../../../assets/brand/Raspberry_Pi.svg"),
+    ),
+    (
         "brand/crdrako-0.svg",
         include_bytes!("../../../../assets/brand/crdrako-0.svg"),
     ),

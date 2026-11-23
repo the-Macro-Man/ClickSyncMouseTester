@@ -572,7 +572,8 @@ fn brand_placement(
     )
 }
 pub(super) fn brand_key(name: &str, vendor: Option<u16>) -> String {
-    const PROFILES: [(&str, &[&str], &[u16]); 11] = [
+    const PROFILES: [(&str, &[&str], &[u16]); 12] = [
+        ("raspberry_pi", &["rp2040", "raspberry pi"], &[0x2e8a]),
         ("maicong", &["maicong", "mai cong", "mchose", "迈从"], &[]),
         ("logi", &["logitech", "logi"], &[0x046d]),
         ("razer", &["razer"], &[0x1532]),
@@ -1165,6 +1166,37 @@ pub(super) fn menu<T: 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raspberry_pi_brand_matches_board_names_without_changing_other_brands() {
+        assert_eq!(
+            brand_key("Adafruit Feather RP2040 USB Host", Some(0x239a)),
+            "raspberry_pi"
+        );
+        assert_eq!(brand_key("RP2040", None), "raspberry_pi");
+        assert_eq!(brand_key("raspberry-pi pico", None), "raspberry_pi");
+        assert_eq!(brand_key("USB Input Device", Some(0x2e8a)), "raspberry_pi");
+        assert_eq!(brand_key("Razer Basilisk V3 Pro", Some(0x1532)), "razer");
+        assert_eq!(brand_key("Adafruit USB Device", Some(0x239a)), "nuit");
+        assert_eq!(brand_key("notrp2040device", None), "nuit");
+    }
+
+    #[test]
+    fn raspberry_pi_asset_is_embedded_and_fits_its_layout() {
+        use gpui::AssetSource;
+        let elements = assets().get("raspberry_pi").unwrap();
+        assert_eq!(elements.len(), 1);
+        let element = &elements[0];
+        let source = design::Assets;
+        let bytes = source.load(&element.path).unwrap().unwrap();
+        assert_eq!(
+            bytes.as_ref(),
+            include_bytes!("../../../../assets/brand/Raspberry_Pi.svg")
+        );
+        let (bounds, _) = brand_placement(364.0, brand_layout(364.0, 620.0, 1), element, 0, None);
+        assert!(f32::from(bounds.size.width) > 0.0);
+        assert!(f32::from(bounds.size.height) > 0.0);
+    }
 
     fn geometry() -> Geometry {
         super::geometry(DEFAULT_WIDTH as f32, DEFAULT_HEIGHT as f32)

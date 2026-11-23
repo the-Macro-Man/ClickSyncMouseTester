@@ -1,4 +1,11 @@
 {
+  "raspberry_pi": [
+    {
+      "path": "brand/Raspberry_Pi.svg",
+      "bounds": [164, -10, 1249, 1595],
+      "raster_bounds": [164, -10, 1249, 1595]
+    }
+  ],
   "logi": [
     {
       "path": "brand/logi-0.svg",

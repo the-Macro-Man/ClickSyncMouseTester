@@ -73,6 +73,7 @@ This fork adds report-rate CSV export and analysis. Download a build from this f
 Supports **Windows x64**. [Download the latest build](https://github.com/the-Macro-Man/ClickSyncMouseTester/releases/latest/download/clicksync-app.exe) and double-click it to launch. See this fork's [Releases](https://github.com/the-Macro-Man/ClickSyncMouseTester/releases) for other published builds, or run from source.
 The executable is unsigned, so Windows SmartScreen may show a warning.
 Use the top-left menu to switch features and the top-right controls to change language and theme.
+The menu shows the Raspberry Pi logo for devices identified as RP2040 or Raspberry Pi; other devices retain their existing branding.
 
 <details>
 <summary>Run from source</summary>
