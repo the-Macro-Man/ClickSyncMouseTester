@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Nuitfanee/ClickSyncMouseTester/releases">下载</a> ·
+  <a href="https://github.com/the-Macro-Man/ClickSyncMouseTester/releases/latest/download/clicksync-app.exe">下载</a> ·
   <a href="#功能">功能</a> ·
   <a href="#如何使用">如何使用</a>
 </p>
@@ -22,7 +22,7 @@
 受到 [MouseTester](https://github.com/microe1/MouseTester) 启发的 Windows 鼠标测试与分析工具。
 **自 v0.8.0 起，已完成 Rust 重写**，使用 GPUI 构建界面、Direct3D 11 绘制图表，通过 Windows Raw Input 采集输入。
 
-此分支新增回报率 CSV 导出；上游发布包不包含此功能，请从此分支源码构建。
+此分支新增回报率 CSV 导出；请下载此分支的发布包以使用该功能。
 
 ![鼠标性能分析：轨迹、报告时间间隔与 X/Y 位移](UI/UI5.png)
 
@@ -70,7 +70,8 @@
 
 ### 启动
 
-支持 **Windows x64**。获取 **v0.8.0 或更高版本**的 `.exe` 发布包后，双击即可运行；发布包见 [Releases](https://github.com/Nuitfanee/ClickSyncMouseTester/releases)，也可从源码启动。
+支持 **Windows x64**。[下载最新版本](https://github.com/the-Macro-Man/ClickSyncMouseTester/releases/latest/download/clicksync-app.exe)后双击运行；其他发布包见此分支的 [Releases](https://github.com/the-Macro-Man/ClickSyncMouseTester/releases)，也可从源码启动。
+该可执行文件未签名，Windows SmartScreen 可能显示警告。
 进入功能页后，可通过左上角菜单切换功能，右上角切换语言与主题。
 
 <details>

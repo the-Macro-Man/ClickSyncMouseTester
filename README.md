@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Nuitfanee/ClickSyncMouseTester/releases">Download</a> ·
+  <a href="https://github.com/the-Macro-Man/ClickSyncMouseTester/releases/latest/download/clicksync-app.exe">Download</a> ·
   <a href="#features">Features</a> ·
   <a href="#getting-started">Getting Started</a>
 </p>
@@ -22,7 +22,7 @@
 A Windows mouse testing and analysis tool inspired by [MouseTester](https://github.com/microe1/MouseTester).
 **Fully rewritten in Rust starting with v0.8.0**, with a GPUI interface, Direct3D 11 charts, and Windows Raw Input capture.
 
-This fork adds report-rate CSV export. Upstream releases do not include this change; build this fork to use it.
+This fork adds report-rate CSV export. Download a build from this fork to use it.
 
 ![Mouse performance analysis: trajectory, report intervals, and X/Y counts](UI/UI5.png)
 
@@ -70,7 +70,8 @@ This fork adds report-rate CSV export. Upstream releases do not include this cha
 
 ### Launch
 
-Supports **Windows x64**. Once you have a **v0.8.0 or newer** `.exe` release, double-click it to launch. See [Releases](https://github.com/Nuitfanee/ClickSyncMouseTester/releases) for published builds, or run from source.
+Supports **Windows x64**. [Download the latest build](https://github.com/the-Macro-Man/ClickSyncMouseTester/releases/latest/download/clicksync-app.exe) and double-click it to launch. See this fork's [Releases](https://github.com/the-Macro-Man/ClickSyncMouseTester/releases) for other published builds, or run from source.
+The executable is unsigned, so Windows SmartScreen may show a warning.
 Use the top-left menu to switch features and the top-right controls to change language and theme.
 
 <details>
