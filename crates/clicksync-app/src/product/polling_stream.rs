@@ -16,6 +16,7 @@ use std::{
 
 pub(crate) const SAMPLE_HZ: u32 = 120;
 const MAX_OBSERVATION_AGE: Duration = Duration::from_millis(50);
+const MAX_LOG_SAMPLES: usize = 1_000_000;
 
 fn sample_interval() -> Duration {
     Duration::from_secs_f64(1.0 / f64::from(SAMPLE_HZ))
@@ -101,6 +102,35 @@ impl Reader {
     pub fn same_source(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
     }
+
+    pub fn paused_log(
+        &self,
+        receiver: u64,
+        generation: u64,
+        reset: u64,
+        revision: u64,
+    ) -> Result<Vec<HistoryPoint>, String> {
+        let slot = self.0.lock().unwrap();
+        let frame = slot
+            .latest
+            .as_ref()
+            .ok_or("Report-rate sampler is not ready")?;
+        if !frame.belongs_to(receiver, generation, reset)
+            || frame.revision != revision
+            || frame.running
+        {
+            return Err("Wait for the report-rate test to finish pausing".into());
+        }
+        if slot.log_incomplete {
+            return Err("Report-rate log exceeded its memory limit; the log is incomplete".into());
+        }
+        let mut samples = Vec::new();
+        samples
+            .try_reserve_exact(slot.log.len())
+            .map_err(|error| format!("Cannot allocate report-rate log: {error}"))?;
+        samples.extend_from_slice(&slot.log);
+        Ok(samples)
+    }
 }
 
 #[derive(Default)]
@@ -110,6 +140,28 @@ struct Mailbox {
     epoch: u64,
     state_epoch: u64,
     closing: bool,
+    log: Vec<HistoryPoint>,
+    log_incomplete: bool,
+}
+
+impl Mailbox {
+    fn record_sample(&mut self, frame: &Frame) {
+        if frame.running
+            && frame.metrics.status == RateStatus::Valid
+            && let Some(point) = frame.history.last().copied()
+            && point.logical_ms == frame.logical_ms
+            && self
+                .log
+                .last()
+                .is_none_or(|last| point.observed_ms > last.observed_ms)
+        {
+            if self.log.len() >= MAX_LOG_SAMPLES || self.log.try_reserve(1).is_err() {
+                self.log_incomplete = true;
+            } else {
+                self.log.push(point);
+            }
+        }
+    }
 }
 
 #[derive(Default)]
@@ -391,6 +443,7 @@ impl Worker {
                                         ..frame
                                     }
                                 };
+                                slot.record_sample(&frame);
                                 slot.latest = Some(Arc::new(frame));
                             }
                         }
@@ -421,6 +474,8 @@ impl Worker {
         });
         if replaced {
             slot.state_epoch += 1;
+            slot.log.clear();
+            slot.log_incomplete = false;
         }
         if wake {
             slot.epoch += 1;
@@ -441,6 +496,8 @@ impl Worker {
         {
             slot.request = None;
             slot.latest = None;
+            slot.log.clear();
+            slot.log_incomplete = false;
             slot.epoch += 1;
             slot.state_epoch += 1;
             self.wake.notify();
@@ -589,6 +646,66 @@ mod tests {
                 &AtomicBool::new(false),
             )
             .unwrap()
+    }
+    #[test]
+    fn log_retains_history_across_graph_window_and_rejects_stale_or_incomplete_exports() {
+        let reader = Reader(Arc::new(Mutex::new(Mailbox::default())));
+        {
+            let mut mailbox = reader.0.lock().unwrap();
+            for time in 0..=500 {
+                let frame = Frame::for_test(1, 0, time as f64 * 10.0, 1000.0);
+                mailbox.record_sample(&frame);
+                mailbox.record_sample(&frame);
+            }
+            let mut delayed = Frame::for_test(1, 0, 5010.0, 1000.0);
+            delayed.metrics.status = RateStatus::Delayed;
+            mailbox.record_sample(&delayed);
+            let mut paused = Frame::for_test(1, 0, 5000.0, 1000.0);
+            paused.running = false;
+            paused.revision = 2;
+            mailbox.latest = Some(Arc::new(paused));
+        }
+        let log = reader.paused_log(1, 1, 0, 2).unwrap();
+        assert_eq!(log.len(), 501);
+        assert_eq!(log.first().unwrap().observed_ms, 0.0);
+        assert_eq!(log.last().unwrap().observed_ms, 5000.0);
+        assert!(reader.paused_log(1, 2, 0, 2).is_err());
+        assert!(reader.paused_log(1, 1, 0, 1).is_err());
+        reader.0.lock().unwrap().log_incomplete = true;
+        assert!(reader.paused_log(1, 1, 0, 2).is_err());
+    }
+    #[test]
+    fn log_collects_actual_engine_samples_beyond_three_seconds() {
+        let mut session = session();
+        let request = request(prefix(&mut session, CapturePhase::Collecting));
+        let mut state = State::default();
+        let mut mailbox = Mailbox::default();
+        let mut next = 1000;
+        let mut last = None;
+        for time in (1000..=6000).step_by(50) {
+            while next <= time {
+                append(&mut session, next);
+                next += 1;
+            }
+            let frame = sample(
+                &mut state,
+                &request,
+                &prefix(&mut session, CapturePhase::Collecting),
+                time as f64,
+            );
+            mailbox.record_sample(&frame);
+            last = Some(frame);
+        }
+        let frame = last.unwrap();
+        assert!(
+            frame.history.last().unwrap().observed_ms - frame.history.first().unwrap().observed_ms
+                <= 3000.0
+        );
+        assert!(
+            mailbox.log.last().unwrap().observed_ms - mailbox.log.first().unwrap().observed_ms
+                > 4000.0
+        );
+        assert!(mailbox.log.iter().all(|sample| sample.rate == 1000.0));
     }
     #[test]
     fn one_twenty_hz_late_deadlines_do_not_backfill() {
@@ -874,19 +991,31 @@ mod tests {
             }
         };
         assert_eq!(configure(&r).observation, 1);
+        {
+            let mut mailbox = reader.0.lock().unwrap();
+            mailbox.record_sample(&Frame::for_test(1, 0, 1000.0, 1000.0));
+        }
         r.revision += 1;
         assert_eq!(configure(&r).observation, 2);
+        assert_eq!(reader.0.lock().unwrap().log.len(), 1);
         worker.clear(2);
         assert!(reader.latest().is_some());
+        assert_eq!(reader.0.lock().unwrap().log.len(), 1);
         worker.clear(1);
         assert!(reader.latest().is_none());
+        assert!(reader.0.lock().unwrap().log.is_empty());
         r.revision += 1;
         assert_eq!(configure(&r).observation, 1);
+        {
+            let mut mailbox = reader.0.lock().unwrap();
+            mailbox.record_sample(&Frame::for_test(1, 0, 1000.0, 1000.0));
+        }
         r.revision += 1;
         assert_eq!(configure(&r).observation, 2);
         r.source = PrefixReader::controlled(p);
         r.revision += 1;
         assert_eq!(configure(&r).observation, 1);
+        assert!(reader.0.lock().unwrap().log.is_empty());
         worker.shutdown();
     }
     #[test]

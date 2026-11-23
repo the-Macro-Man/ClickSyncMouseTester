@@ -1656,6 +1656,15 @@ fn localized_capture_error(error: &str, english: bool) -> &str {
         | ("capture stop reports an incomplete received prefix", false) => {
             "本次数据不完整，请重新开始测量。"
         }
+        ("Report-rate sampler is not ready", false) => "回报率采样器尚未就绪。",
+        ("Wait for the report-rate test to finish pausing", false) => "请等待回报率测试暂停完成。",
+        ("Report-rate log exceeded its memory limit; the log is incomplete", false) => {
+            "回报率日志超出内存限制，日志不完整。"
+        }
+        ("Pause the test and wait for capture to finish before exporting", false) => {
+            "请暂停测试并等待采集完成后再导出。"
+        }
+        ("No report-rate capture is available to export", false) => "没有可导出的回报率记录。",
         _ => error,
     }
 }

@@ -28,6 +28,12 @@ pub enum FileRequest {
         snapshot: Arc<SessionSnapshot>,
         cpi: Option<f64>,
     },
+    ExportPolling {
+        path: PathBuf,
+        snapshot: Arc<SessionSnapshot>,
+        samples: Vec<clicksync_chart::analysis::polling::HistoryPoint>,
+        source_complete: bool,
+    },
     Query {
         result: Arc<ChartResult>,
         key: u32,
@@ -210,6 +216,19 @@ pub fn execute(request: FileRequest) -> Result<FileResult, String> {
             })?;
             Ok(FileResult::Saved(path))
         }
+        FileRequest::ExportPolling {
+            path,
+            snapshot,
+            samples,
+            source_complete,
+        } => {
+            atomic_file(&path, |file| {
+                let mut writer = BufWriter::with_capacity(65536, file);
+                write_polling_csv(&mut writer, &snapshot, &samples, source_complete)?;
+                writer.flush().map_err(|error| error.to_string())
+            })?;
+            Ok(FileResult::Saved(path))
+        }
         FileRequest::Settings(mut settings) => {
             settings.validate();
             let path = Settings::path();
@@ -219,6 +238,7 @@ pub fn execute(request: FileRequest) -> Result<FileResult, String> {
             })?;
             Ok(FileResult::Saved(path))
         }
+
         FileRequest::Query { result, key, range } => {
             let _reservation = result
                 .byte_budget
@@ -297,6 +317,87 @@ pub fn execute(request: FileRequest) -> Result<FileResult, String> {
         }
     }
 }
+
+fn write_polling_csv(
+    writer: &mut impl Write,
+    snapshot: &SessionSnapshot,
+    samples: &[clicksync_chart::analysis::polling::HistoryPoint],
+    source_complete: bool,
+) -> Result<(), String> {
+    let frequency = snapshot.timestamp_frequency();
+    let origin = snapshot
+        .segments()
+        .first()
+        .map_or(0, |segment| segment.started_at_raw_capture_ticks);
+    let origin_ms = origin as f64 * 1000.0 / frequency as f64;
+    let row = |writer: &mut dyn Write, fields: &[String]| -> Result<(), String> {
+        for (index, field) in fields.iter().enumerate() {
+            if index != 0 {
+                write!(writer, ",").map_err(|error| error.to_string())?;
+            }
+            if field.contains([',', '"', '\r', '\n']) {
+                write!(writer, "\"{}\"", field.replace('"', "\"\""))
+                    .map_err(|error| error.to_string())?;
+            } else {
+                write!(writer, "{field}").map_err(|error| error.to_string())?;
+            }
+        }
+        writeln!(writer).map_err(|error| error.to_string())
+    };
+    writeln!(
+        writer,
+        "type,elapsed_ms,active_ms,capture_segment,rate_segment,raw_ticks,tick_hz,rate_hz,rounded_hz,dx,dy,packet_kind,button_flags,button_data,mouse_flags,extra_information,capture_sequence,timing_sequence,integrity,device_name,movement_mode,ignored_after_limit,overflow,disconnected,source_complete"
+    )
+    .map_err(|error| error.to_string())?;
+    let mut fields: [String; 25] = Default::default();
+    fields[0] = "metadata".into();
+    fields[6] = frequency.to_string();
+    fields[18] = format!("{:?}", snapshot.integrity());
+    fields[19] = snapshot.metadata().display_name.clone();
+    let evidence = snapshot.capture_evidence();
+    fields[21] = evidence.ignored_after_limit.to_string();
+    fields[22] = evidence.overflow.to_string();
+    fields[23] = evidence.disconnected.to_string();
+    fields[24] = source_complete.to_string();
+    row(writer, &fields)?;
+    for event in snapshot.events() {
+        let mut fields: [String; 25] = Default::default();
+        fields[0] = "report".into();
+        fields[1] = format!(
+            "{:.6}",
+            event.raw_capture_ticks as f64 * 1000.0 / frequency as f64 - origin_ms
+        );
+        fields[2] = format!(
+            "{:.6}",
+            event.logical_ticks as f64 * 1000.0 / frequency as f64
+        );
+        fields[3] = event.session_segment_id.to_string();
+        fields[5] = event.raw_capture_ticks.to_string();
+        fields[9] = event.raw_delta_x.to_string();
+        fields[10] = event.raw_delta_y.to_string();
+        fields[11] = format!("{:?}", event.packet_kind);
+        fields[12] = event.button_flags.to_string();
+        fields[13] = event.button_data.to_string();
+        fields[14] = event.raw_mouse_flags.to_string();
+        fields[15] = event.extra_information.to_string();
+        fields[16] = event.capture_sequence.to_string();
+        fields[17] = event.timing_sequence.to_string();
+        fields[20] = format!("{:?}", event.movement_mode);
+        row(writer, &fields)?;
+    }
+    for sample in samples {
+        let mut fields: [String; 25] = Default::default();
+        fields[0] = "rate".into();
+        fields[1] = format!("{:.6}", sample.observed_ms - origin_ms);
+        fields[2] = format!("{:.6}", sample.logical_ms - origin_ms);
+        fields[4] = sample.segment.to_string();
+        fields[7] = format!("{:.6}", sample.rate);
+        fields[8] = (sample.rate.round_ties_even() as i32).to_string();
+        row(writer, &fields)?;
+    }
+    Ok(())
+}
+
 pub fn imported_prefix(
     snapshot: Arc<SessionSnapshot>,
     key: u32,
@@ -371,4 +472,91 @@ fn utc_now() -> String {
         time.wSecond,
         time.wMilliseconds
     )
+}
+
+#[cfg(test)]
+mod polling_export_tests {
+    use super::*;
+    use clicksync_chart::analysis::polling::HistoryPoint;
+    use clicksync_core::{RawMouseMovementMode, RawMouseRecord, Session, SessionMetadata};
+
+    #[test]
+    fn csv_contains_raw_reports_and_rate_samples_with_escaped_metadata() {
+        let mut session = Session::new(
+            SessionConfig {
+                timestamp_frequency: 1000,
+                ..Default::default()
+            },
+            SharedByteBudget::new(4 * 1024 * 1024),
+            SessionMetadata {
+                display_name: "Mouse, \"test\"".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        session.begin_collecting(1000, true, true).unwrap();
+        session
+            .append(RawMouseRecord::new(
+                2,
+                -3,
+                1010,
+                1,
+                1,
+                RawMouseMovementMode::Relative,
+            ))
+            .unwrap();
+        session.pause();
+        session.begin_collecting(5000, false, true).unwrap();
+        session
+            .append(RawMouseRecord::new(
+                0,
+                0,
+                5010,
+                2,
+                2,
+                RawMouseMovementMode::Relative,
+            ))
+            .unwrap();
+        session.pause();
+        let snapshot = session.snapshot().unwrap();
+        let samples = [HistoryPoint {
+            observed_ms: 5010.0,
+            logical_ms: 1020.0,
+            rate: 996.6666667,
+            segment: 2,
+        }];
+        let mut output = Vec::new();
+        write_polling_csv(&mut output, &snapshot, &samples, true).unwrap();
+        let csv = String::from_utf8(output).unwrap();
+        assert!(csv.contains("\"Mouse, \"\"test\"\"\""));
+        let lines: Vec<_> = csv.lines().collect();
+        assert_eq!(lines.len(), 5);
+        assert!(lines[2].starts_with("report,10.000000,10.000000,1,,1010,"));
+        assert!(lines[3].starts_with("report,4010.000000,20.000000,2,,5010,"));
+        assert!(lines[4].starts_with("rate,4010.000000,20.000000,,2,,,996.666667,997,"));
+    }
+
+    #[test]
+    fn csv_propagates_write_errors() {
+        struct Broken;
+        impl Write for Broken {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("disk full"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut session = Session::new(
+            SessionConfig::default(),
+            SharedByteBudget::new(4 * 1024 * 1024),
+            SessionMetadata::default(),
+        )
+        .unwrap();
+        assert!(
+            write_polling_csv(&mut Broken, &session.snapshot().unwrap(), &[], true)
+                .unwrap_err()
+                .contains("disk full")
+        );
+    }
 }

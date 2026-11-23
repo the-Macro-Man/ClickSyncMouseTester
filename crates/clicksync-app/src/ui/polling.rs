@@ -81,6 +81,8 @@ struct ContentKey {
     peak: Option<i32>,
     error: Option<String>,
     quality: RateStatus,
+    file_busy: bool,
+    file_message: Option<String>,
 }
 
 struct Content {
@@ -397,6 +399,90 @@ impl GpuiHost {
         }
         self.capture_command("reset");
     }
+    fn export_polling(&mut self, cx: &mut Context<Self>) {
+        if self.file_busy || self.lock.locked() || self.runtime.borrow().pending_action().is_some()
+        {
+            return;
+        }
+        let prefix = self
+            .runtime
+            .borrow()
+            .backend
+            .as_ref()
+            .and_then(|backend| backend.latest_prefix());
+        let Some(prefix) = prefix.filter(|prefix| {
+            prefix.generation >= self.page_generation
+                && matches!(
+                    prefix.phase,
+                    CapturePhase::Paused | CapturePhase::Stopped | CapturePhase::Faulted
+                )
+        }) else {
+            self.control_error =
+                Some("Pause the test and wait for capture to finish before exporting".into());
+            return;
+        };
+        let Some((_, snapshot)) = prefix
+            .datasets
+            .iter()
+            .find(|(key, _)| Some(*key) == self.polling.session_device)
+        else {
+            self.control_error = Some("No report-rate capture is available to export".into());
+            return;
+        };
+        let snapshot = snapshot.clone();
+        let source_complete = prefix.complete;
+        let samples = match self.runtime.borrow().polling_stream.reader().paused_log(
+            self.receiver.0,
+            prefix.generation,
+            self.domain_reset,
+            self.polling.revision,
+        ) {
+            Ok(samples) => samples,
+            Err(error) => {
+                self.control_error = Some(error);
+                return;
+            }
+        };
+        let directory = match std::env::current_dir() {
+            Ok(directory) => directory,
+            Err(error) => {
+                self.control_error = Some(error.to_string());
+                return;
+            }
+        };
+        let chosen = cx.prompt_for_new_path(&directory, Some("clicksync-report-rate.csv"));
+        self.file_busy = true;
+        self.file_message = None;
+        self.control_error = None;
+        cx.spawn(async move |host, cx| {
+            let answer = chosen.await;
+            let _ = host.update(cx, |host, cx| {
+                host.file_busy = false;
+                match answer {
+                    Ok(Ok(Some(path))) => {
+                        let result = host.runtime.borrow_mut().submit_file(
+                            host.receiver,
+                            FileRequest::ExportPolling {
+                                path,
+                                snapshot,
+                                samples,
+                                source_complete,
+                            },
+                        );
+                        match result {
+                            Ok(()) => host.file_busy = true,
+                            Err(error) => host.control_error = Some(error),
+                        }
+                    }
+                    Ok(Ok(None)) => {}
+                    Ok(Err(error)) => host.control_error = Some(error.to_string()),
+                    Err(error) => host.control_error = Some(error.to_string()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
     pub(super) fn polling_select(&mut self, key: u32) {
         if self.lock.locked()
             || self.runtime.borrow().pending_action().is_some()
@@ -482,6 +568,7 @@ impl GpuiHost {
         self.polling.revision += 1;
         match action {
             "start" => {
+                self.file_message = None;
                 self.polling.pause_ms = None;
                 self.polling.session_device = self.selected.first().copied();
                 self.polling.frame = None;
@@ -506,6 +593,7 @@ impl GpuiHost {
                 self.polling.pause_ms = prefix.as_ref().map(|p| self.polling.domain_now(p));
             }
             "reset" => {
+                self.file_message = None;
                 self.polling.clearing_since = Some(Instant::now());
                 self.domain_reset += 1;
                 self.runtime.borrow().polling_stream.clear(self.receiver.0);
@@ -599,6 +687,8 @@ impl GpuiHost {
                 self.settings.english,
             ),
             quality: self.polling.quality,
+            file_busy: self.file_busy,
+            file_message: self.file_message.clone(),
         };
         if self.polling.clearing_since.is_some() || self.polling.content_key.as_ref() != Some(&key)
         {
@@ -1116,6 +1206,33 @@ impl GpuiHost {
                     )
                 },
             )
+            .child(
+                design::button(
+                    "polling-export",
+                    self.text("导出 CSV", "EXPORT CSV"),
+                    palette,
+                    self.settings.english,
+                    false,
+                    has_session && enabled && !self.file_busy,
+                )
+                .w_full()
+                .h(px(40.0))
+                .when(!has_session || !enabled || self.file_busy, |button| {
+                    button.opacity(0.4)
+                })
+                .on_click(cx.listener(|host, _, _, cx| {
+                    host.export_polling(cx);
+                    cx.notify();
+                })),
+            )
+            .when_some(self.file_message.clone(), |actions, message| {
+                actions.child(
+                    div()
+                        .text_size(px(13.0))
+                        .text_color(rgb(palette.muted))
+                        .child(message),
+                )
+            })
             .child(
                 div()
                     .flex()
