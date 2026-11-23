@@ -33,6 +33,16 @@ enum PollingRows {
     Both,
 }
 
+pub enum PollingAnalysisSource {
+    Capture {
+        snapshot: Arc<SessionSnapshot>,
+        samples: Vec<clicksync_chart::analysis::polling::HistoryPoint>,
+        source_complete: bool,
+    },
+    Import(PathBuf),
+    Existing(Arc<crate::product::polling_analysis::Data>),
+}
+
 pub enum FileRequest {
     ImportAnalysis {
         path: PathBuf,
@@ -56,6 +66,12 @@ pub enum FileRequest {
         snapshot: Arc<SessionSnapshot>,
         samples: Vec<clicksync_chart::analysis::polling::HistoryPoint>,
         source_complete: bool,
+    },
+    AnalyzePolling {
+        source: PollingAnalysisSource,
+        comparison: Option<Arc<crate::product::polling_analysis::Data>>,
+        replace_comparison: bool,
+        target: u32,
     },
     Query {
         result: Arc<ChartResult>,
@@ -93,6 +109,15 @@ pub enum FileResult {
     SavedPollingPair {
         reports: PathBuf,
         rates: PathBuf,
+    },
+    PollingAnalysis {
+        primary: Arc<crate::product::polling_analysis::Data>,
+        primary_summary: crate::product::polling_analysis::Summary,
+        comparison: Option<(
+            Arc<crate::product::polling_analysis::Data>,
+            crate::product::polling_analysis::Summary,
+        )>,
+        target: u32,
     },
     Query(QuerySummary),
 }
@@ -284,6 +309,46 @@ pub fn execute(request: FileRequest) -> Result<FileResult, String> {
                     Ok(FileResult::SavedPollingPair { reports, rates })
                 }
             }
+        }
+        FileRequest::AnalyzePolling {
+            source,
+            comparison,
+            replace_comparison,
+            target,
+        } => {
+            let loaded = match source {
+                PollingAnalysisSource::Capture {
+                    snapshot,
+                    samples,
+                    source_complete,
+                } => Arc::new(crate::product::polling_analysis::Data::from_snapshot(
+                    &snapshot,
+                    &samples,
+                    source_complete,
+                )?),
+                PollingAnalysisSource::Import(path) => {
+                    Arc::new(crate::product::polling_analysis::import(&path)?)
+                }
+                PollingAnalysisSource::Existing(data) => data,
+            };
+            let (primary, comparison) = if replace_comparison {
+                (
+                    comparison.ok_or("Load a first test before comparing")?,
+                    Some(loaded),
+                )
+            } else {
+                (loaded, comparison)
+            };
+            let primary_summary = primary.summary(target)?;
+            let comparison = comparison
+                .map(|data| data.summary(target).map(|summary| (data, summary)))
+                .transpose()?;
+            Ok(FileResult::PollingAnalysis {
+                primary,
+                primary_summary,
+                comparison,
+                target,
+            })
         }
         FileRequest::Settings(mut settings) => {
             settings.validate();
@@ -653,6 +718,84 @@ mod polling_export_tests {
                 expected_rates
             );
         }
+    }
+
+    #[test]
+    fn polling_analysis_imports_export_modes_and_rejects_bad_csv() {
+        let (snapshot, samples) = example();
+        for rows in [PollingRows::Rates, PollingRows::Both] {
+            let mut output = Vec::new();
+            write_polling_csv(&mut output, &snapshot, &samples, true, rows).unwrap();
+            let data = crate::product::polling_analysis::import_reader(output.as_slice()).unwrap();
+            assert_eq!(data.name, "Mouse, \"test\"");
+            assert_eq!(data.rates.len(), 1);
+            assert!((data.rates[0].rate - 996.666667).abs() < 0.00001);
+            assert_eq!(
+                data.quality.reports,
+                if matches!(rows, PollingRows::Both) {
+                    Some(2)
+                } else {
+                    None
+                }
+            );
+            assert!(
+                data.intervals.is_empty(),
+                "intervals must not cross capture segments"
+            );
+        }
+        let mut output = Vec::new();
+        write_polling_csv(&mut output, &snapshot, &samples, true, PollingRows::Reports).unwrap();
+        assert!(
+            crate::product::polling_analysis::import_reader(output.as_slice())
+                .err()
+                .unwrap()
+                .contains("No valid rate")
+        );
+        assert!(
+            crate::product::polling_analysis::import_reader("type,elapsed_ms\nrate,1\n".as_bytes())
+                .is_err()
+        );
+        let mut output = Vec::new();
+        write_polling_csv(&mut output, &snapshot, &samples, true, PollingRows::Rates).unwrap();
+        let bad = String::from_utf8(output)
+            .unwrap()
+            .replace("996.666667", "NaN");
+        assert!(crate::product::polling_analysis::import_reader(bad.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn polling_comparison_recomputes_both_summaries_at_target() {
+        let (snapshot, samples) = example();
+        let primary = Arc::new(
+            crate::product::polling_analysis::Data::from_snapshot(&snapshot, &samples, true)
+                .unwrap(),
+        );
+        let other = Arc::new(
+            crate::product::polling_analysis::Data::from_snapshot(&snapshot, &samples, true)
+                .unwrap(),
+        );
+        let result = execute(FileRequest::AnalyzePolling {
+            source: PollingAnalysisSource::Existing(other.clone()),
+            comparison: Some(primary.clone()),
+            replace_comparison: true,
+            target: 500,
+        })
+        .unwrap();
+        let FileResult::PollingAnalysis {
+            primary: actual,
+            primary_summary,
+            comparison,
+            target,
+        } = result
+        else {
+            panic!("unexpected result")
+        };
+        assert!(Arc::ptr_eq(&actual, &primary));
+        assert_eq!(target, 500);
+        assert_eq!(primary_summary.minimum, samples[0].rate);
+        let (actual_other, summary) = comparison.unwrap();
+        assert!(Arc::ptr_eq(&actual_other, &other));
+        assert_eq!(summary.minimum, samples[0].rate);
     }
 
     #[test]

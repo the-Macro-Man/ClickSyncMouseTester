@@ -1,6 +1,7 @@
 use crate::backend::{CapturePhase, SessionPrefix};
 pub mod performance_analysis;
 pub mod performance_summary;
+pub(crate) mod polling_analysis;
 pub(crate) mod polling_stream;
 use clicksync_chart::{
     Axis, ChartParameters, HistogramPolicy, HistogramScale, HistogramSpec, Metric, TimeBasis,

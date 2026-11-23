@@ -1188,6 +1188,15 @@ impl GpuiHost {
             Ok(FileResult::SavedPollingPair { reports, rates }) => {
                 self.file_message = Some(format!("{}\n{}", reports.display(), rates.display()))
             }
+            Ok(FileResult::PollingAnalysis {
+                primary,
+                primary_summary,
+                comparison,
+                target,
+            }) => self
+                .polling
+                .analysis
+                .set_result(primary, primary_summary, comparison, target),
             Ok(FileResult::Query(query)) => {
                 if self.query_request == Some(query.request_id) {
                     self.query = Some(query);

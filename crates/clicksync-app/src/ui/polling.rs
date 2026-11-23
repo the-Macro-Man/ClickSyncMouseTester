@@ -4,6 +4,7 @@ use crate::product::polling_stream::Frame;
 use crate::product_files::{PollingDestination, PollingExportMode};
 use clicksync_chart::analysis::polling::{PollingMetrics, PollingMode, RateStatus};
 use std::time::Instant;
+mod analysis;
 pub(super) mod history;
 #[cfg(feature = "ui-restoration-probe")]
 pub(in crate::ui) mod probe;
@@ -128,6 +129,7 @@ pub(super) struct PollingPage {
     clearing_since: Option<Instant>,
     pause_ms: Option<f64>,
     export_mode: PollingExportMode,
+    pub(super) analysis: analysis::AnalysisState,
     pub history_bounds: Arc<Mutex<[f32; 4]>>,
     pub readout_bounds: Arc<Mutex<[f32; 4]>>,
 }
@@ -157,6 +159,7 @@ impl Default for PollingPage {
             clearing_since: None,
             pause_ms: None,
             export_mode: PollingExportMode::default(),
+            analysis: analysis::AnalysisState::default(),
             history_bounds: Arc::new(Mutex::new([0.0; 4])),
             readout_bounds: Arc::new(Mutex::new([0.0; 4])),
         }
@@ -698,6 +701,9 @@ impl GpuiHost {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
+        if self.polling.analysis.open {
+            return self.render_polling_analysis(cx);
+        }
         let slots = self.polling.readout.as_ref().map_or(4, |readout| {
             readout.read(cx).slots_for(&self.polling.current_text)
         });
@@ -1288,6 +1294,22 @@ impl GpuiHost {
                     .opacity(status_alpha)
                     .child(notes),
             )
+            .child(
+                design::button(
+                    "polling-analysis",
+                    self.text("分析与比较", "ANALYZE / COMPARE"),
+                    palette,
+                    self.settings.english,
+                    false,
+                    enabled && !self.file_busy,
+                )
+                .w_full()
+                .h(px(40.0))
+                .on_click(cx.listener(|host, _, _, cx| {
+                    host.open_polling_analysis(cx);
+                    cx.notify();
+                })),
+            )
             .when_some(
                 localized_ui_error(
                     &self.control_error,
@@ -1454,9 +1476,12 @@ impl GpuiHost {
                     ),
             );
         let rail = div()
+            .id("polling-controls")
             .relative()
             .w(px(344.0))
             .flex_shrink_0()
+            .min_h_0()
+            .overflow_y_scroll()
             .border_l_1()
             .border_color(rgb(palette.hairline))
             .pl(px(32.0))

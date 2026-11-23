@@ -22,7 +22,7 @@
 A Windows mouse testing and analysis tool inspired by [MouseTester](https://github.com/microe1/MouseTester).
 **Fully rewritten in Rust starting with v0.8.0**, with a GPUI interface, Direct3D 11 charts, and Windows Raw Input capture.
 
-This fork adds report-rate CSV export. Download a build from this fork to use it.
+This fork adds report-rate CSV export and analysis. Download a build from this fork to use them.
 
 ![Mouse performance analysis: trajectory, report intervals, and X/Y counts](UI/UI5.png)
 
@@ -32,7 +32,7 @@ This fork adds report-rate CSV export. Download a build from this fork to use it
 | --- | --- |
 | **Mouse performance charts** | Record trajectories, X/Y counts, velocity, report intervals, and frequency. Test one mouse or compare two, pan and zoom, and inspect statistics for a selected time range |
 | **Recording comparison** | Import and export full recordings as JSON, and overlay saved data for comparison |
-| **Report rate testing** | View the live motion report rate, peak tier, empty-packet ratio, and a 3-second history; export the test as CSV |
+| **Report rate testing** | View live motion rates, export CSV, and analyze or compare saved tests, dips, consistency, and report intervals |
 | **Sensitivity matching** | Move two mice together to calculate the target mouse's recommended DPI and match the source mouse's translational sensitivity |
 | **Angle calibration** | Analyze natural horizontal swipes for mean correction angle, left/right difference, and stroke variation; copy the result |
 | **Button, wheel, and key detection** | Inspect press/release counts, double clicks, press intervals, and hold durations for five mouse buttons; test scrolling and a custom key |
@@ -101,6 +101,12 @@ Press `Esc` or right-click to pause, resume to collect more data, or choose **En
 While paused, choose **Reports**, **Rates**, **Both: one file**, or **Both: two files**, then select **Export CSV** before clearing the test or leaving the page. The two-file option asks for the reports filename first and the rates filename second; cancelling either dialog saves nothing. Each CSV includes a metadata row and the selected raw reports or valid report-rate graph samples from the whole test, including earlier pause/resume segments. In a combined file rows are grouped by type rather than sorted together; use `elapsed_ms` to compare them. It includes pauses and is measured from the first capture segment, not a wall-clock timestamp. `active_ms` excludes pauses using the app's separate report and graph clocks, so use `elapsed_ms` to align the two row types. `raw_ticks` and `tick_hz` preserve the capture clock; `rate_hz` is the graph's 300 ms motion-report rate and `rounded_hz` is its rounded value. Empty and non-motion reports are included as raw rows but do not count toward the motion rate.
 
 Samples are recorded only when the app has a valid, timely measurement; gaps are not zero rates. The metadata includes the source completeness flag, integrity value, overflow and retention-drop counts, and disconnect status. These describe capture completeness within the app, not guaranteed hardware delivery. The sample log is limited to 1,000,000 points; if it fills, exports that include rates report an error instead of silently producing a partial rate log. Reports-only export remains available. Exported files can contain the device name and mouse input details.
+
+Select **Analyze / Compare** while paused, or open it without a test to import a combined or rates-only CSV. **Open CSV** loads test A; **Compare CSV** loads test B. Select the mouse's expected rate (1,000 Hz by default) for both tests. The summaries show sample-weighted mean, median, 1st percentile and minimum, plus the time spent below, within ±5% of, and above the target. Coverage and percentages include only consecutive valid samples in the same segment at most 50 ms apart; the previous sample's value is used for each interval. Pauses and gaps are excluded.
+
+Dips are continuous covered intervals below 90% of the target; click a dip to jump to it. The list shows up to 500 dips, while the count includes all detected dips. Use `+`, `-`, `<` and `>` to zoom and navigate the full-session graph, and hover for a nearby retained sample. The overview keeps bucket minima and maxima; zoom for individual samples. **Report intervals** displays intervals between consecutive raw reports in the same capture segment, with at most 50,000 retained points; a rates-only CSV cannot provide these intervals. Equal timestamps can result from operating-system batching.
+
+The rate is based on non-zero movement in a rolling 300 ms window. Move the mouse continuously when testing: stopping or slowing movement, scheduling delays, and capture gaps can produce low readings. A dip or an equal timestamp alone does not prove a hardware fault or packet loss.
 
 ### Sensitivity Matching
 
