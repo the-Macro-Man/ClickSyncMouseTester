@@ -1185,6 +1185,9 @@ impl GpuiHost {
                 | FileResult::ConvertedRange { .. },
             ) => {}
             Ok(FileResult::Saved(path)) => self.file_message = Some(path.display().to_string()),
+            Ok(FileResult::SavedPollingPair { reports, rates }) => {
+                self.file_message = Some(format!("{}\n{}", reports.display(), rates.display()))
+            }
             Ok(FileResult::Query(query)) => {
                 if self.query_request == Some(query.request_id) {
                     self.query = Some(query);
@@ -1665,6 +1668,9 @@ fn localized_capture_error(error: &str, english: bool) -> &str {
             "请暂停测试并等待采集完成后再导出。"
         }
         ("No report-rate capture is available to export", false) => "没有可导出的回报率记录。",
+        ("Choose different files for reports and rates", false) => {
+            "请为报告和回报率选择不同的文件。"
+        }
         _ => error,
     }
 }

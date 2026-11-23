@@ -1,6 +1,7 @@
 use super::*;
 use crate::backend::{AppStatus, CapturePhase, SessionPrefix};
 use crate::product::polling_stream::Frame;
+use crate::product_files::{PollingDestination, PollingExportMode};
 use clicksync_chart::analysis::polling::{PollingMetrics, PollingMode, RateStatus};
 use std::time::Instant;
 pub(super) mod history;
@@ -83,6 +84,7 @@ struct ContentKey {
     quality: RateStatus,
     file_busy: bool,
     file_message: Option<String>,
+    export_mode: PollingExportMode,
 }
 
 struct Content {
@@ -125,6 +127,7 @@ pub(super) struct PollingPage {
     quality: RateStatus,
     clearing_since: Option<Instant>,
     pause_ms: Option<f64>,
+    export_mode: PollingExportMode,
     pub history_bounds: Arc<Mutex<[f32; 4]>>,
     pub readout_bounds: Arc<Mutex<[f32; 4]>>,
 }
@@ -153,6 +156,7 @@ impl Default for PollingPage {
             quality: RateStatus::WarmingUp,
             clearing_since: None,
             pause_ms: None,
+            export_mode: PollingExportMode::default(),
             history_bounds: Arc::new(Mutex::new([0.0; 4])),
             readout_bounds: Arc::new(Mutex::new([0.0; 4])),
         }
@@ -431,16 +435,21 @@ impl GpuiHost {
         };
         let snapshot = snapshot.clone();
         let source_complete = prefix.complete;
-        let samples = match self.runtime.borrow().polling_stream.reader().paused_log(
-            self.receiver.0,
-            prefix.generation,
-            self.domain_reset,
-            self.polling.revision,
-        ) {
-            Ok(samples) => samples,
-            Err(error) => {
-                self.control_error = Some(error);
-                return;
+        let mode = self.polling.export_mode;
+        let samples = if mode == PollingExportMode::Reports {
+            Vec::new()
+        } else {
+            match self.runtime.borrow().polling_stream.reader().paused_log(
+                self.receiver.0,
+                prefix.generation,
+                self.domain_reset,
+                self.polling.revision,
+            ) {
+                Ok(samples) => samples,
+                Err(error) => {
+                    self.control_error = Some(error);
+                    return;
+                }
             }
         };
         let directory = match std::env::current_dir() {
@@ -450,20 +459,62 @@ impl GpuiHost {
                 return;
             }
         };
-        let chosen = cx.prompt_for_new_path(&directory, Some("clicksync-report-rate.csv"));
+        let filename = match mode {
+            PollingExportMode::Reports | PollingExportMode::Separate => "clicksync-reports.csv",
+            PollingExportMode::Rates => "clicksync-rates.csv",
+            PollingExportMode::Combined => "clicksync-report-rate.csv",
+        };
+        let chosen = cx.prompt_for_new_path(&directory, Some(filename));
         self.file_busy = true;
         self.file_message = None;
         self.control_error = None;
         cx.spawn(async move |host, cx| {
-            let answer = chosen.await;
+            let answer: Result<Option<PollingDestination>, String> = async {
+                let first = chosen
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .map_err(|error| error.to_string())?;
+                let Some(first) = first else {
+                    return Ok(None);
+                };
+                let destination = match mode {
+                    PollingExportMode::Reports => PollingDestination::Reports(first),
+                    PollingExportMode::Rates => PollingDestination::Rates(first),
+                    PollingExportMode::Combined => PollingDestination::Combined(first),
+                    PollingExportMode::Separate => {
+                        let directory = first
+                            .parent()
+                            .ok_or("Invalid export destination")?
+                            .to_owned();
+                        let chosen = host
+                            .update(cx, |_, cx| {
+                                cx.prompt_for_new_path(&directory, Some("clicksync-rates.csv"))
+                            })
+                            .map_err(|error| error.to_string())?;
+                        let rates = chosen
+                            .await
+                            .map_err(|error| error.to_string())?
+                            .map_err(|error| error.to_string())?;
+                        let Some(rates) = rates else {
+                            return Ok(None);
+                        };
+                        PollingDestination::Separate {
+                            reports: first,
+                            rates,
+                        }
+                    }
+                };
+                Ok(Some(destination))
+            }
+            .await;
             let _ = host.update(cx, |host, cx| {
                 host.file_busy = false;
                 match answer {
-                    Ok(Ok(Some(path))) => {
+                    Ok(Some(destination)) => {
                         let result = host.runtime.borrow_mut().submit_file(
                             host.receiver,
                             FileRequest::ExportPolling {
-                                path,
+                                destination,
                                 snapshot,
                                 samples,
                                 source_complete,
@@ -474,9 +525,8 @@ impl GpuiHost {
                             Err(error) => host.control_error = Some(error),
                         }
                     }
-                    Ok(Ok(None)) => {}
-                    Ok(Err(error)) => host.control_error = Some(error.to_string()),
-                    Err(error) => host.control_error = Some(error.to_string()),
+                    Ok(None) => {}
+                    Err(error) => host.control_error = Some(error),
                 }
                 cx.notify();
             });
@@ -689,6 +739,7 @@ impl GpuiHost {
             quality: self.polling.quality,
             file_busy: self.file_busy,
             file_message: self.file_message.clone(),
+            export_mode: self.polling.export_mode,
         };
         if self.polling.clearing_since.is_some() || self.polling.content_key.as_ref() != Some(&key)
         {
@@ -1152,6 +1203,53 @@ impl GpuiHost {
         } else {
             self.text("开始测试", "START TEST")
         };
+        let mut export_options = div().flex().flex_col().gap(px(6.0));
+        for choices in [
+            [
+                (PollingExportMode::Reports, self.text("原始报告", "Reports")),
+                (PollingExportMode::Rates, self.text("回报率", "Rates")),
+            ],
+            [
+                (
+                    PollingExportMode::Combined,
+                    self.text("合并文件", "Both: one file"),
+                ),
+                (
+                    PollingExportMode::Separate,
+                    self.text("分开文件", "Both: two files"),
+                ),
+            ],
+        ] {
+            let mut row = div().flex().gap(px(6.0));
+            for (mode, label) in choices {
+                row = row.child(
+                    design::button(
+                        format!("polling-export-option-{}", mode as u8),
+                        label,
+                        palette,
+                        self.settings.english,
+                        false,
+                        !self.file_busy,
+                    )
+                    .flex_1()
+                    .min_w_0()
+                    .px(px(4.0))
+                    .text_size(px(13.0))
+                    .when(self.polling.export_mode == mode, |button| {
+                        button
+                            .bg(rgb(palette.selected))
+                            .border_color(rgb(palette.accent))
+                    })
+                    .on_click(cx.listener(move |host, _, _, cx| {
+                        if !host.file_busy {
+                            host.polling.export_mode = mode;
+                            cx.notify();
+                        }
+                    })),
+                );
+            }
+            export_options = export_options.child(row);
+        }
         let actions = div()
             .mt(px(32.0))
             .flex_shrink_0()
@@ -1206,6 +1304,13 @@ impl GpuiHost {
                     )
                 },
             )
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .text_color(rgb(palette.muted))
+                    .child(self.text("CSV 内容", "CSV CONTENT")),
+            )
+            .child(export_options)
             .child(
                 design::button(
                     "polling-export",

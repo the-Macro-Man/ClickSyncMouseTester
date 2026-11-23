@@ -10,6 +10,29 @@ use std::{
     time::Duration,
 };
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub enum PollingExportMode {
+    Reports,
+    Rates,
+    #[default]
+    Combined,
+    Separate,
+}
+
+pub enum PollingDestination {
+    Reports(PathBuf),
+    Rates(PathBuf),
+    Combined(PathBuf),
+    Separate { reports: PathBuf, rates: PathBuf },
+}
+
+#[derive(Clone, Copy)]
+enum PollingRows {
+    Reports,
+    Rates,
+    Both,
+}
+
 pub enum FileRequest {
     ImportAnalysis {
         path: PathBuf,
@@ -29,7 +52,7 @@ pub enum FileRequest {
         cpi: Option<f64>,
     },
     ExportPolling {
-        path: PathBuf,
+        destination: PollingDestination,
         snapshot: Arc<SessionSnapshot>,
         samples: Vec<clicksync_chart::analysis::polling::HistoryPoint>,
         source_complete: bool,
@@ -67,6 +90,10 @@ pub enum FileResult {
         range: Option<(f64, f64)>,
     },
     Saved(PathBuf),
+    SavedPollingPair {
+        reports: PathBuf,
+        rates: PathBuf,
+    },
     Query(QuerySummary),
 }
 
@@ -217,17 +244,46 @@ pub fn execute(request: FileRequest) -> Result<FileResult, String> {
             Ok(FileResult::Saved(path))
         }
         FileRequest::ExportPolling {
-            path,
+            destination,
             snapshot,
             samples,
             source_complete,
         } => {
-            atomic_file(&path, |file| {
-                let mut writer = BufWriter::with_capacity(65536, file);
-                write_polling_csv(&mut writer, &snapshot, &samples, source_complete)?;
-                writer.flush().map_err(|error| error.to_string())
-            })?;
-            Ok(FileResult::Saved(path))
+            let save = |path: &Path, rows| {
+                atomic_file(path, |file| {
+                    let mut writer = BufWriter::with_capacity(65536, file);
+                    write_polling_csv(&mut writer, &snapshot, &samples, source_complete, rows)?;
+                    writer.flush().map_err(|error| error.to_string())
+                })
+            };
+            match destination {
+                PollingDestination::Reports(path) => {
+                    save(&path, PollingRows::Reports)?;
+                    Ok(FileResult::Saved(path))
+                }
+                PollingDestination::Rates(path) => {
+                    save(&path, PollingRows::Rates)?;
+                    Ok(FileResult::Saved(path))
+                }
+                PollingDestination::Combined(path) => {
+                    save(&path, PollingRows::Both)?;
+                    Ok(FileResult::Saved(path))
+                }
+                PollingDestination::Separate { reports, rates } => {
+                    if same_destination(&reports, &rates)? {
+                        return Err("Choose different files for reports and rates".into());
+                    }
+                    save(&reports, PollingRows::Reports)?;
+                    save(&rates, PollingRows::Rates).map_err(|error| {
+                        format!(
+                            "Reports saved to {}; failed to save rates to {}: {error}",
+                            reports.display(),
+                            rates.display()
+                        )
+                    })?;
+                    Ok(FileResult::SavedPollingPair { reports, rates })
+                }
+            }
         }
         FileRequest::Settings(mut settings) => {
             settings.validate();
@@ -323,6 +379,7 @@ fn write_polling_csv(
     snapshot: &SessionSnapshot,
     samples: &[clicksync_chart::analysis::polling::HistoryPoint],
     source_complete: bool,
+    rows: PollingRows,
 ) -> Result<(), String> {
     let frequency = snapshot.timestamp_frequency();
     let origin = snapshot
@@ -360,42 +417,74 @@ fn write_polling_csv(
     fields[23] = evidence.disconnected.to_string();
     fields[24] = source_complete.to_string();
     row(writer, &fields)?;
-    for event in snapshot.events() {
-        let mut fields: [String; 25] = Default::default();
-        fields[0] = "report".into();
-        fields[1] = format!(
-            "{:.6}",
-            event.raw_capture_ticks as f64 * 1000.0 / frequency as f64 - origin_ms
-        );
-        fields[2] = format!(
-            "{:.6}",
-            event.logical_ticks as f64 * 1000.0 / frequency as f64
-        );
-        fields[3] = event.session_segment_id.to_string();
-        fields[5] = event.raw_capture_ticks.to_string();
-        fields[9] = event.raw_delta_x.to_string();
-        fields[10] = event.raw_delta_y.to_string();
-        fields[11] = format!("{:?}", event.packet_kind);
-        fields[12] = event.button_flags.to_string();
-        fields[13] = event.button_data.to_string();
-        fields[14] = event.raw_mouse_flags.to_string();
-        fields[15] = event.extra_information.to_string();
-        fields[16] = event.capture_sequence.to_string();
-        fields[17] = event.timing_sequence.to_string();
-        fields[20] = format!("{:?}", event.movement_mode);
-        row(writer, &fields)?;
+    if matches!(rows, PollingRows::Reports | PollingRows::Both) {
+        for event in snapshot.events() {
+            let mut fields: [String; 25] = Default::default();
+            fields[0] = "report".into();
+            fields[1] = format!(
+                "{:.6}",
+                event.raw_capture_ticks as f64 * 1000.0 / frequency as f64 - origin_ms
+            );
+            fields[2] = format!(
+                "{:.6}",
+                event.logical_ticks as f64 * 1000.0 / frequency as f64
+            );
+            fields[3] = event.session_segment_id.to_string();
+            fields[5] = event.raw_capture_ticks.to_string();
+            fields[9] = event.raw_delta_x.to_string();
+            fields[10] = event.raw_delta_y.to_string();
+            fields[11] = format!("{:?}", event.packet_kind);
+            fields[12] = event.button_flags.to_string();
+            fields[13] = event.button_data.to_string();
+            fields[14] = event.raw_mouse_flags.to_string();
+            fields[15] = event.extra_information.to_string();
+            fields[16] = event.capture_sequence.to_string();
+            fields[17] = event.timing_sequence.to_string();
+            fields[20] = format!("{:?}", event.movement_mode);
+            row(writer, &fields)?;
+        }
     }
-    for sample in samples {
-        let mut fields: [String; 25] = Default::default();
-        fields[0] = "rate".into();
-        fields[1] = format!("{:.6}", sample.observed_ms - origin_ms);
-        fields[2] = format!("{:.6}", sample.logical_ms - origin_ms);
-        fields[4] = sample.segment.to_string();
-        fields[7] = format!("{:.6}", sample.rate);
-        fields[8] = (sample.rate.round_ties_even() as i32).to_string();
-        row(writer, &fields)?;
+    if matches!(rows, PollingRows::Rates | PollingRows::Both) {
+        for sample in samples {
+            let mut fields: [String; 25] = Default::default();
+            fields[0] = "rate".into();
+            fields[1] = format!("{:.6}", sample.observed_ms - origin_ms);
+            fields[2] = format!("{:.6}", sample.logical_ms - origin_ms);
+            fields[4] = sample.segment.to_string();
+            fields[7] = format!("{:.6}", sample.rate);
+            fields[8] = (sample.rate.round_ties_even() as i32).to_string();
+            row(writer, &fields)?;
+        }
     }
     Ok(())
+}
+
+fn same_destination(first: &Path, second: &Path) -> Result<bool, String> {
+    let normalize = |path: &Path| -> Result<PathBuf, String> {
+        let parent = path.parent().ok_or("Invalid export destination")?;
+        let name = path.file_name().ok_or("Invalid export filename")?;
+        Ok(std::fs::canonicalize(parent)
+            .map_err(|error| format!("Cannot access export directory: {error}"))?
+            .join(name))
+    };
+    let first = normalize(first)?;
+    let second = normalize(second)?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
+        let first: Vec<_> = first.as_os_str().encode_wide().collect();
+        let second: Vec<_> = second.as_os_str().encode_wide().collect();
+        let result = unsafe { CompareStringOrdinal(&first, &second, true) };
+        if result.0 == 0 {
+            return Err("Cannot compare export filenames".into());
+        }
+        Ok(result == CSTR_EQUAL)
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(first == second)
+    }
 }
 
 pub fn imported_prefix(
@@ -480,8 +569,7 @@ mod polling_export_tests {
     use clicksync_chart::analysis::polling::HistoryPoint;
     use clicksync_core::{RawMouseMovementMode, RawMouseRecord, Session, SessionMetadata};
 
-    #[test]
-    fn csv_contains_raw_reports_and_rate_samples_with_escaped_metadata() {
+    fn example() -> (Arc<SessionSnapshot>, Vec<HistoryPoint>) {
         let mut session = Session::new(
             SessionConfig {
                 timestamp_frequency: 1000,
@@ -518,15 +606,21 @@ mod polling_export_tests {
             ))
             .unwrap();
         session.pause();
-        let snapshot = session.snapshot().unwrap();
-        let samples = [HistoryPoint {
+        let snapshot = Arc::new(session.snapshot().unwrap());
+        let samples = vec![HistoryPoint {
             observed_ms: 5010.0,
             logical_ms: 1020.0,
             rate: 996.6666667,
             segment: 2,
         }];
+        (snapshot, samples)
+    }
+
+    #[test]
+    fn csv_contains_selected_rows_and_escaped_metadata() {
+        let (snapshot, samples) = example();
         let mut output = Vec::new();
-        write_polling_csv(&mut output, &snapshot, &samples, true).unwrap();
+        write_polling_csv(&mut output, &snapshot, &samples, true, PollingRows::Both).unwrap();
         let csv = String::from_utf8(output).unwrap();
         assert!(csv.contains("\"Mouse, \"\"test\"\"\""));
         let lines: Vec<_> = csv.lines().collect();
@@ -534,6 +628,90 @@ mod polling_export_tests {
         assert!(lines[2].starts_with("report,10.000000,10.000000,1,,1010,"));
         assert!(lines[3].starts_with("report,4010.000000,20.000000,2,,5010,"));
         assert!(lines[4].starts_with("rate,4010.000000,20.000000,,2,,,996.666667,997,"));
+        for (rows, expected_reports, expected_rates) in [
+            (PollingRows::Reports, 2, 0),
+            (PollingRows::Rates, 0, 1),
+            (PollingRows::Both, 2, 1),
+        ] {
+            let mut output = Vec::new();
+            write_polling_csv(&mut output, &snapshot, &samples, true, rows).unwrap();
+            let csv = String::from_utf8(output).unwrap();
+            assert_eq!(
+                csv.lines()
+                    .filter(|line| line.starts_with("metadata,"))
+                    .count(),
+                1
+            );
+            assert_eq!(
+                csv.lines()
+                    .filter(|line| line.starts_with("report,"))
+                    .count(),
+                expected_reports
+            );
+            assert_eq!(
+                csv.lines().filter(|line| line.starts_with("rate,")).count(),
+                expected_rates
+            );
+        }
+    }
+
+    #[test]
+    fn separate_exports_use_two_distinct_destinations() {
+        let directory = std::env::temp_dir().join(format!(
+            "clicksync-export-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let reports = directory.join("reports.csv");
+        let rates = directory.join("rates.csv");
+        let (snapshot, samples) = example();
+        let request = |destination| FileRequest::ExportPolling {
+            destination,
+            snapshot: snapshot.clone(),
+            samples: samples.clone(),
+            source_complete: true,
+        };
+        let result = execute(request(PollingDestination::Separate {
+            reports: reports.clone(),
+            rates: rates.clone(),
+        }));
+        assert!(matches!(result, Ok(FileResult::SavedPollingPair { .. })));
+        let report_text = std::fs::read_to_string(&reports).unwrap();
+        let rate_text = std::fs::read_to_string(&rates).unwrap();
+        assert!(report_text.lines().any(|line| line.starts_with("report,")));
+        assert!(!report_text.lines().any(|line| line.starts_with("rate,")));
+        assert!(rate_text.lines().any(|line| line.starts_with("rate,")));
+        assert!(!rate_text.lines().any(|line| line.starts_with("report,")));
+        assert!(
+            execute(request(PollingDestination::Separate {
+                reports: reports.clone(),
+                rates: directory.join("REPORTS.CSV"),
+            }))
+            .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(&reports).unwrap(), report_text);
+        let partial_report = directory.join("partial.csv");
+        let invalid_rate = directory.join("rate-directory");
+        std::fs::create_dir(&invalid_rate).unwrap();
+        let error = match execute(request(PollingDestination::Separate {
+            reports: partial_report.clone(),
+            rates: invalid_rate.clone(),
+        })) {
+            Err(error) => error,
+            Ok(_) => panic!("saving over a directory must fail"),
+        };
+        assert!(error.contains("Reports saved to"));
+        assert!(error.contains("failed to save rates"));
+        assert!(partial_report.is_file());
+        std::fs::remove_file(partial_report).unwrap();
+        std::fs::remove_dir(invalid_rate).unwrap();
+        std::fs::remove_file(reports).unwrap();
+        std::fs::remove_file(rates).unwrap();
+        std::fs::remove_dir(directory).unwrap();
     }
 
     #[test]
@@ -554,9 +732,15 @@ mod polling_export_tests {
         )
         .unwrap();
         assert!(
-            write_polling_csv(&mut Broken, &session.snapshot().unwrap(), &[], true)
-                .unwrap_err()
-                .contains("disk full")
+            write_polling_csv(
+                &mut Broken,
+                &session.snapshot().unwrap(),
+                &[],
+                true,
+                PollingRows::Both
+            )
+            .unwrap_err()
+            .contains("disk full")
         );
     }
 }
