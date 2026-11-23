@@ -11,6 +11,45 @@ pub(in crate::ui) mod probe;
 mod readout;
 mod sampling;
 
+struct ExportNames {
+    reports: String,
+    rates: String,
+    combined: String,
+}
+
+fn export_names(device: &str, timestamp: &str) -> ExportNames {
+    let sanitized = detail::sanitized_export_name(device);
+    let mut name = String::new();
+    let mut length = 0;
+    for ch in sanitized.chars() {
+        length += ch.len_utf16();
+        if length > 120 {
+            break;
+        }
+        name.push(ch);
+    }
+    let suffix = format!("{name}-{timestamp}.csv");
+    ExportNames {
+        reports: format!("clicksync-reports-{suffix}"),
+        rates: format!("clicksync-rates-{suffix}"),
+        combined: format!("clicksync-report-rate-{suffix}"),
+    }
+}
+
+fn export_timestamp() -> String {
+    let time = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
+    format!(
+        "{:04}-{:02}-{:02}_{:02}-{:02}-{:02}-{:03}",
+        time.wYear,
+        time.wMonth,
+        time.wDay,
+        time.wHour,
+        time.wMinute,
+        time.wSecond,
+        time.wMilliseconds
+    )
+}
+
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 enum Status {
     #[default]
@@ -455,17 +494,36 @@ impl GpuiHost {
                 }
             }
         };
-        let directory = match std::env::current_dir() {
-            Ok(directory) => directory,
+        let directory = match std::env::current_exe() {
+            Ok(path) => match path.parent() {
+                Some(directory) => directory.to_owned(),
+                None => {
+                    self.control_error = Some("Cannot determine the executable folder".into());
+                    return;
+                }
+            },
             Err(error) => {
-                self.control_error = Some(error.to_string());
+                self.control_error =
+                    Some(format!("Cannot determine the executable folder: {error}"));
                 return;
             }
         };
+        let device = self
+            .polling
+            .session_device
+            .and_then(|key| {
+                self.runtime
+                    .borrow()
+                    .device_catalog
+                    .label(key)
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| snapshot.metadata().display_name.clone());
+        let names = export_names(&device, &export_timestamp());
         let filename = match mode {
-            PollingExportMode::Reports | PollingExportMode::Separate => "clicksync-reports.csv",
-            PollingExportMode::Rates => "clicksync-rates.csv",
-            PollingExportMode::Combined => "clicksync-report-rate.csv",
+            PollingExportMode::Reports | PollingExportMode::Separate => &names.reports,
+            PollingExportMode::Rates => &names.rates,
+            PollingExportMode::Combined => &names.combined,
         };
         let chosen = cx.prompt_for_new_path(&directory, Some(filename));
         self.file_busy = true;
@@ -491,7 +549,7 @@ impl GpuiHost {
                             .to_owned();
                         let chosen = host
                             .update(cx, |_, cx| {
-                                cx.prompt_for_new_path(&directory, Some("clicksync-rates.csv"))
+                                cx.prompt_for_new_path(&directory, Some(&names.rates))
                             })
                             .map_err(|error| error.to_string())?;
                         let rates = chosen
@@ -1546,6 +1604,42 @@ impl GpuiHost {
 #[cfg(test)]
 mod presentation_tests {
     use super::*;
+
+    #[test]
+    fn polling_export_names_share_device_and_timestamp_for_all_modes() {
+        let names = export_names("Mouse A", "2026-11-23_21-17-25-123");
+        assert_eq!(
+            names.reports,
+            "clicksync-reports-Mouse A-2026-11-23_21-17-25-123.csv"
+        );
+        assert_eq!(
+            names.rates,
+            "clicksync-rates-Mouse A-2026-11-23_21-17-25-123.csv"
+        );
+        assert_eq!(
+            names.combined,
+            "clicksync-report-rate-Mouse A-2026-11-23_21-17-25-123.csv"
+        );
+    }
+
+    #[test]
+    fn polling_export_names_are_safe_and_bounded_for_windows() {
+        let names = export_names(" .Mouse<>:\"/\\|?*\n. ", "time");
+        assert_eq!(names.rates, "clicksync-rates-Mouse__________-time.csv");
+        assert_eq!(
+            export_names(" . ", "time").rates,
+            "clicksync-rates-Mouse-time.csv"
+        );
+        let names = export_names(&"😀".repeat(200), "time");
+        let component = names
+            .rates
+            .strip_prefix("clicksync-rates-")
+            .unwrap()
+            .strip_suffix("-time.csv")
+            .unwrap();
+        assert_eq!(component.encode_utf16().count(), 120);
+        assert_eq!(component.chars().count(), 60);
+    }
 
     fn valid(rate: i32) -> PollingMetrics {
         PollingMetrics {

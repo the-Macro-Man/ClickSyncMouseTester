@@ -5,7 +5,7 @@ use std::{collections::hash_map::RandomState, hash::BuildHasher};
 use workspace::compact_button;
 mod statistics;
 
-fn default_export_filename(mouse_name: &str) -> String {
+pub(super) fn sanitized_export_name(mouse_name: &str) -> String {
     let name: String = mouse_name
         .chars()
         .map(|ch| {
@@ -17,7 +17,15 @@ fn default_export_filename(mouse_name: &str) -> String {
         })
         .collect();
     let name = name.trim_matches(|ch: char| ch.is_whitespace() || ch == '.');
-    let name = if name.is_empty() { "Mouse" } else { name };
+    if name.is_empty() {
+        "Mouse".into()
+    } else {
+        name.into()
+    }
+}
+
+fn default_export_filename(mouse_name: &str) -> String {
+    let name = sanitized_export_name(mouse_name);
     const CODE_CHARACTERS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     let code = loop {
         let mut random = RandomState::new().hash_one(mouse_name);
